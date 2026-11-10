@@ -23,9 +23,11 @@ from typing import Any, Literal
 from . import costrate
 from .daycount import add_months, parse_date
 from .errors import InputError
-from .money import ONE, ZERO, Number, as_float, money, non_negative, positive, power, rate, whole
+from .money import ONE, ZERO, Number, as_float, kurus, money, non_negative, positive, power, rate, whole
+from .tr.rates import DEFAULT_RATE_MULTIPLIER_CAP
 
 Method = Literal["annuity", "equal_principal", "bullet"]
+MAX_INSTALMENTS = 1200
 THIRTY = Decimal(30)
 
 
@@ -82,6 +84,8 @@ class Plan:
     fee: Decimal = ZERO
     """Paid by the borrower at drawdown (for example the allocation fee, with its own tax if any)."""
     first_period_days: int = 30
+    interest_only_periods: int = 0
+    balloon: Decimal = ZERO
 
     @property
     def n(self) -> int:
@@ -94,8 +98,9 @@ class Plan:
     @property
     def instalment(self) -> Decimal:
         """The regular instalment (the first one after any interest-only periods)."""
-        regular = [r.payment for r in self.rows if r.principal > 0]
-        return regular[0] if regular else self.rows[0].payment
+        if self.method == "bullet":
+            return self.rows[0].payment
+        return self.rows[min(self.interest_only_periods, self.n - 1)].payment
 
     def total(self, column: str) -> Decimal:
         return sum((getattr(r, column) for r in self.rows), ZERO)
@@ -200,14 +205,14 @@ def plan(
     * ``first_period_days``: days from drawdown to the first instalment when not 30.
     * ``start``: drawdown date; instalments then carry dates one month apart.
     """
-    p = positive(principal, "principal")
+    p = kurus(principal, "principal")
     r = rate(monthly_rate, "monthly_rate", maximum=1)
-    count = whole(n, "n", minimum=1)
+    count = whole(n, "n", minimum=1, maximum=MAX_INSTALMENTS)
     lev = Levies.of(kkdf, bsmv)
     fee_d = non_negative(fee, "fee")
     grace = whole(interest_only_periods, "interest_only_periods")
     residual = non_negative(balloon, "balloon")
-    first_days = whole(first_period_days, "first_period_days", minimum=1)
+    first_days = whole(first_period_days, "first_period_days", minimum=1, maximum=366)
     if method not in ("annuity", "equal_principal", "bullet"):
         raise InputError("method must be annuity, equal_principal or bullet")
     if grace >= count:
@@ -239,19 +244,23 @@ def plan(
             principal_part = balance
         elif method == "annuity":
             principal_part = level - interest - kk - bs
-            if principal_part < 0:
+            # After a long first period the interest can exceed the instalment: the balance then
+            # grows in that month, as the regulation's own formula implies. Anywhere else it is an error.
+            if principal_part < 0 and not (k == 1 and first_days > 30):
                 raise InputError("the instalment does not cover the interest; check the rate and the term")
         else:
             principal_part = slice_
+        principal_part = min(principal_part, balance)  # rounding must not repay more than is owed
         payment = principal_part + interest + kk + bs
         balance -= principal_part
-        date = (
-            add_months(start_date, k - 1) + dt.timedelta(days=first_days)
-            if start_date and first_days != 30
-            else (add_months(start_date, k) if start_date else None)
-        )
+        if start_date is None:
+            date = None
+        elif first_days == 30:
+            date = add_months(start_date, k)
+        else:
+            date = add_months(start_date + dt.timedelta(days=first_days), k - 1)
         rows.append(Row(k, date, payment, interest, kk, bs, principal_part, balance))
-    return Plan(p, r, lev, method, tuple(rows), fee_d, first_days)
+    return Plan(p, r, lev, method, tuple(rows), fee_d, first_days, grace, residual)
 
 
 # ---- early repayment, partial prepayment, late payment ----------------------------------------
@@ -265,8 +274,7 @@ def accrued(balance: Decimal, monthly_rate: Decimal, days: int, levies: Levies) 
 
 
 def _balance_after(p: Plan, paid: int) -> Decimal:
-    if not 0 <= paid <= p.n:
-        raise InputError(f"instalments_paid must lie between 0 and {p.n}")
+    whole(paid, "instalments_paid", maximum=p.n)
     return p.principal if paid == 0 else p.rows[paid - 1].balance
 
 
@@ -278,7 +286,7 @@ def payoff(p: Plan, instalments_paid: int, days_since_last_due: int = 0) -> dict
     Otherwise interest for the actual days since the last due date is added, with its levies.
     """
     balance = _balance_after(p, instalments_paid)
-    d = whole(days_since_last_due, "days_since_last_due")
+    d = whole(days_since_last_due, "days_since_last_due", maximum=59)
     interest, kk, bs = accrued(balance, p.monthly_rate, d, p.levies)
     remaining = sum((r.payment for r in p.rows[instalments_paid:]), ZERO)
     total = balance + interest + kk + bs
@@ -308,8 +316,15 @@ def prepay(
       (``days_to_next_due``, by default 30 minus the days since the last one; give the calendar
       days when the month is not 30 days long) are carried in the new instalment.
 
-    Returns the new plan for the remaining instalments.
+    Returns the new plan for the remaining instalments. Only plans with equal instalments and no
+    balloon are supported, and only after any interest-only months have passed: how a prepayment
+    reshapes other plans is a matter for the contract.
     """
+    if p.method != "annuity" or p.balloon > 0 or instalments_paid < p.interest_only_periods:
+        raise InputError(
+            "partial prepayment is computed for equal-instalment plans without a balloon, after the "
+            "interest-only months; other plans are reshaped as the contract says"
+        )
     balance = _balance_after(p, instalments_paid)
     pay = positive(amount, "amount")
     d = whole(days_since_last_due, "days_since_last_due")
@@ -348,7 +363,7 @@ def late_interest(
     *,
     kkdf: Number = 0,
     bsmv: Number = 0,
-    multiplier: Number = "1.3",
+    multiplier: Number = DEFAULT_RATE_MULTIPLIER_CAP.value,
 ) -> dict[str, Any]:
     """Default interest on a late instalment (consumer credit regulation, Article 18 and Annex 5).
 
@@ -369,7 +384,9 @@ def late_interest(
         "kkdf": as_float(kk),
         "bsmv": as_float(bs),
         "total": as_float(interest + kk + bs),
-        "above_legal_cap": m > Decimal("1.3"),
+        "above_legal_cap": m > DEFAULT_RATE_MULTIPLIER_CAP.value,
+        "legal_cap": as_float(DEFAULT_RATE_MULTIPLIER_CAP.value),
+        "basis": DEFAULT_RATE_MULTIPLIER_CAP.basis,
     }
 
 
@@ -397,18 +414,30 @@ def housing_prepayment_compensation(
 def largest_principal(
     instalment: Number, monthly_rate: Number, n: int, *, kkdf: Number = 0, bsmv: Number = 0
 ) -> Decimal:
-    """Largest loan, to the kuruş, whose rounded instalment does not exceed ``instalment``."""
+    """Largest loan, to the kuruş, none of whose instalments exceeds ``instalment``.
+
+    The last instalment absorbs the rounding of the plan and can be a little higher than the others;
+    it is kept within the budget too.
+    """
     budget = positive(instalment, "instalment")
     r = rate(monthly_rate, "monthly_rate", maximum=1)
-    count = whole(n, "n", minimum=1)
-    gross = r * Levies.of(kkdf, bsmv).factor
-    per_unit = annuity_payment(ONE, gross, count)
-    guess = money(budget / per_unit)
-    while money(annuity_payment(guess, gross, count)) > budget:
-        guess -= Decimal("0.01")
-    while money(annuity_payment(guess + Decimal("0.01"), gross, count)) <= budget:
-        guess += Decimal("0.01")
-    return guess
+    count = whole(n, "n", minimum=1, maximum=MAX_INSTALMENTS)
+    lev = Levies.of(kkdf, bsmv)
+    gross = r * lev.factor
+    cent = Decimal("0.01")
+    guess = money(budget / annuity_payment(ONE, gross, count))
+    while guess > 0 and money(annuity_payment(guess, gross, count)) > budget:
+        guess -= cent
+    while money(annuity_payment(guess + cent, gross, count)) <= budget:
+        guess += cent
+    for _ in range(100_000):
+        if guess <= 0:
+            raise InputError("the instalment is too small for any loan")
+        over = plan(guess, r, count, kkdf=lev.kkdf, bsmv=lev.bsmv).rows[-1].payment - budget
+        if over <= 0:
+            return guess
+        guess -= max(cent, money(over / 2))
+    raise InputError("no loan fits this instalment")
 
 
 def implied_monthly_rate(
@@ -417,10 +446,12 @@ def implied_monthly_rate(
     """Contractual monthly rate behind a quoted instalment (unrounded annuity), by bisection."""
     p = positive(principal, "principal")
     a = positive(instalment, "instalment")
-    count = whole(n, "n", minimum=1)
+    count = whole(n, "n", minimum=1, maximum=MAX_INSTALMENTS)
     factor = Levies.of(kkdf, bsmv).factor
     if a * count < p:
         raise InputError("the instalments add up to less than the principal")
+    if annuity_payment(p, factor, count) < a:
+        raise InputError("the implied rate is above 100 % a month")
     lo, hi = ZERO, ONE
     for _ in range(120):
         mid = (lo + hi) / 2

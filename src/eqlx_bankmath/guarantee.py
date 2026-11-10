@@ -292,6 +292,21 @@ def commission_schedule(
     def by_days(base: Decimal, start: dt.date, end: dt.date) -> Decimal:
         return base * r * TWELVE * days(start, end, day_count) / (rate_months * basis)
 
+    def unused_part(
+        released: Decimal, day: dt.date, end: dt.date, raw: Decimal, base: Decimal, period_days: int
+    ) -> Decimal:
+        """Commission on an amount released on ``day`` for the rest of the period.
+
+        By days when the period is charged by days. When a started period is charged in full, the
+        refund is the same share of that charge: released share x days left / days in the period,
+        so that what stays outstanding always keeps its commission.
+        """
+        if pro_rata:
+            return money(by_days(released, day, end))
+        if base == 0 or period_days == 0:
+            return ZERO
+        return money(raw * released / base * (end - day).days / period_days)
+
     advance = collection == "advance"
     rows: list[Period] = []
     start, k = issue, 0
@@ -303,11 +318,14 @@ def commission_schedule(
         base = outstanding(start)
         raw = by_days(base, start, end) if pro_rata else base * r * months / rate_months
         charged = money(max(raw, minimum))
+        period_days = (end - start).days
         unused = ZERO
         if on_reduction:
-            unused += sum((money(by_days(rel, day, end)) for day, rel in releases if start < day < end), ZERO)
+            unused += sum(
+                (unused_part(rel, day, end, raw, base, period_days) for day, rel in releases if start < day < end), ZERO
+            )
         if on_return and returned is not None and start < returned < end:
-            unused += money(by_days(outstanding(returned), returned, end))
+            unused += unused_part(outstanding(returned), returned, end, raw, base, period_days)
         refund = min(unused, charged - minimum) if charged > minimum else ZERO
         net = charged - refund
         rows.append(

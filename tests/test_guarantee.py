@@ -82,9 +82,11 @@ def test_note_example_bsmv_not_given_back_on_refunds():
 
 def test_note_example_full_periods_but_return_refunded():
     s = note(refund_on_return=True)
-    assert col(s, "refund") == amounts("0", "0", "0", "29600.00")
-    assert (s.commission, s.bsmv, s.cost) == (D("162400.00"), D("8120.00"), D("170520.00"))
-    assert as_percent(s.effective_annual_cost) == D("2.6122")
+    # last quarter 15.10 - 15.01 (92 days) charged in full: 36,000.00. Returned on 02.11 with 74 days left:
+    # refund 36,000 x 74 / 92 = 28,956.52, so the 18 days the letter was outstanding stay paid for.
+    assert col(s, "refund") == amounts("0", "0", "0", "28956.52")
+    assert (s.commission, s.bsmv, s.cost) == (D("163043.48"), D("8152.17"), D("171195.65"))
+    assert as_percent(s.effective_annual_cost) == D("2.6226")
 
 
 def test_same_letter_costs_differently_under_the_conventions():
@@ -170,7 +172,8 @@ def test_minimum_limits_a_refund():
 
 def test_refund_is_never_more_than_the_period_was_charged():
     # full quarter 01.07 - 01.10 (92 days): 3,600,000 x 3.60 % x 3/12 = 32,400.00 collected.
-    # returned the next day: 91 unused days at /360 would be 3,600,000 x 0.036 x 91/360 = 32,760.00
+    # returned the next day: 91 unused days at /360 would be 32,760.00, more than was collected.
+    # The refund is the unused share of the charge instead: 32,400 x 91/92 = 32,047.83; one day costs 352.17 + 17.61 BSMV.
     s = guarantee.commission_schedule(
         3_600_000,
         "0.036",
@@ -180,7 +183,7 @@ def test_refund_is_never_more_than_the_period_was_charged():
         return_date="2026-07-02",
         refund_on_return=True,
     )
-    assert (s.rows[0].collected, s.rows[0].refund, s.cost) == (D("32400.00"), D("32400.00"), D("0.00"))
+    assert (s.rows[0].collected, s.rows[0].refund, s.cost) == (D("32400.00"), D("32047.83"), D("369.78"))
 
 
 def test_rate_quoted_per_three_months():

@@ -117,8 +117,8 @@ def test_unpaid_quarter_interest_paid_or_capitalised():
 
 def test_capitalisation_warnings():
     monthly = revolving.line(100000, [], "2026-07-01", "2026-10-31", "0.36", accrual="monthly")
-    # capitalised on 31.07, 31.08, 30.09; the second and third come less than three months after the one before
-    assert len(monthly["warnings"]) == 2 and "TTK Article 8(2)" in monthly["warnings"][0]
+    # capitalised on 31.07, 31.08, 30.09 and 31.10; all but the first come less than three months after the one before
+    assert len(monthly["warnings"]) == 3 and "TTK Article 8(2)" in monthly["warnings"][0]
     consumer = revolving.line(100000, [], "2026-07-01", "2026-12-31", "0.36", merchant=False)
     assert len(consumer["warnings"]) == 1 and "not a merchant" in consumer["warnings"][0]
     assert (

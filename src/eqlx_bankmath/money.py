@@ -19,6 +19,9 @@ ZERO = Decimal(0)
 ONE = Decimal(1)
 CENT = Decimal("0.01")
 PRECISION = 40
+MAX_MAGNITUDE = Decimal("1e13")  # above this a float can no longer carry the kuruş in JSON output
+MIN_MAGNITUDE = Decimal("1e-12")
+MAX_COUNT = 1_000_000
 
 
 def dec(value: Number, name: str = "value") -> Decimal:
@@ -40,6 +43,8 @@ def dec(value: Number, name: str = "value") -> Decimal:
         raise InputError(f"{name} must be a number, got {value!r}")
     if not out.is_finite():
         raise InputError(f"{name} must be finite, got {value!r}")
+    if out != 0 and not (MIN_MAGNITUDE <= abs(out) <= MAX_MAGNITUDE):
+        raise InputError(f"{name} is outside the range this library computes on (1e-12 to 1e13), got {value!r}")
     return out
 
 
@@ -70,10 +75,20 @@ def rate(value: Number, name: str, *, maximum: Number = 100) -> Decimal:
     return d
 
 
-def whole(value: object, name: str, *, minimum: int = 0) -> int:
+def whole(value: object, name: str, *, minimum: int = 0, maximum: int = MAX_COUNT) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise InputError(f"{name} must be a whole number of at least {minimum}, got {value!r}")
+    if value > maximum:
+        raise InputError(f"{name} must not exceed {maximum}, got {value!r}")
     return value
+
+
+def kurus(value: Number, name: str) -> Decimal:
+    """A positive amount of money with at most two decimals."""
+    d = positive(value, name)
+    if d != money(d):
+        raise InputError(f"{name} has more than two decimals, got {value!r}")
+    return d
 
 
 def power(base: Decimal, exponent: Decimal | int) -> Decimal:

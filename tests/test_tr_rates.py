@@ -27,7 +27,10 @@ def test_housing_and_commercial():
     assert (home["kkdf"], home["bsmv"]) == (0, 0)
     tl = rates.levies("commercial_tl", dt.date(2026, 11, 10))
     fx = rates.levies("commercial_fx", dt.date(2026, 11, 10))
-    assert (tl["kkdf"], tl["bsmv"], fx["kkdf"], fx["bsmv"]) == (0, D("0.05"), D("0.01"), D("0.05"))
+    assert (tl["kkdf"], tl["bsmv"], tl["kkdf_on_principal_at_drawdown"]) == (0, D("0.05"), 0)
+    # on foreign-currency loans KKDF is 1 % of the principal at drawdown, not a levy on interest
+    assert (fx["kkdf"], fx["bsmv"], fx["kkdf_on_principal_at_drawdown"]) == (0, D("0.05"), D("0.01"))
+    assert "principal at drawdown" in fx["kkdf_basis"]
 
 
 def test_dates_outside_the_table_and_unknown_products():

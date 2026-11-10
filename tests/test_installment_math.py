@@ -74,7 +74,8 @@ def test_odd_first_period():
     p = installment.plan(10000, "0.01", 12, first_period_days=45, start="2026-01-10")
     assert p.rows[0].interest == D("150.00")
     assert p.instalment == money(installment.annuity_payment(D(10000), D("0.01"), 12) * D("1.01") ** D("0.5"))
-    assert p.rows[0].date.isoformat() == "2026-02-24" and p.rows[1].date.isoformat() == "2026-03-27"
+    # first due date 45 days after drawdown, then the same day of every month
+    assert [r.date.isoformat() for r in p.rows[:3]] == ["2026-02-24", "2026-03-24", "2026-04-24"]
     # the longer first period costs more in total but about the same per year
     regular = installment.plan(10000, "0.01", 12)
     assert p.total_cost > regular.total_cost
@@ -96,9 +97,11 @@ def test_annual_cost_rate_against_the_plain_annual_rate():
 def test_largest_loan_for_an_instalment_respects_rounding():
     kw = dict(kkdf="0.15", bsmv="0.15")
     best = installment.largest_principal(5000, "0.05", 12, **kw)
-    assert best == D("40793.66")
-    assert installment.plan(best, "0.05", 12, **kw).instalment <= 5000
-    assert installment.plan(best + D("0.01"), "0.05", 12, **kw).instalment > 5000
+    # 40,793.66 has a rounded instalment of 5,000.00 but a last instalment of 5,000.05: not within budget
+    assert max(r.payment for r in installment.plan(D("40793.66"), "0.05", 12, **kw).rows) > 5000
+    assert best == D("40793.62")
+    assert max(r.payment for r in installment.plan(best, "0.05", 12, **kw).rows) <= 5000
+    assert max(r.payment for r in installment.plan(best + D("0.01"), "0.05", 12, **kw).rows) > 5000
 
 
 def test_implied_rate_and_shortest_term():

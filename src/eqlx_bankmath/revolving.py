@@ -143,6 +143,9 @@ def line(
     first, last = parse_date(start, "start"), parse_date(end, "end")
     basis = _basis(year_basis)
     k, b = rate(kkdf, "kkdf", maximum=1), rate(bsmv, "bsmv", maximum=1)
+    _flag(count_end_day, "count_end_day")
+    _flag(capitalise_levies, "capitalise_levies")
+    _flag(merchant, "merchant")
     if unpaid_interest not in ("capitalise", "paid"):
         raise InputError("unpaid_interest must be capitalise or paid")
     ends = period_ends(first, last, accrual)
@@ -184,7 +187,8 @@ def line(
         added = ZERO
         if unpaid_interest == "capitalise":
             added = charge if capitalise_levies else interest
-            if not final and previous_end is not None and add_months(previous_end, 3) > period_end:
+            scheduled = not final or _is_accrual_date(period_end, accrual)
+            if scheduled and previous_end is not None and add_months(previous_end, 3) > period_end + _ONE_DAY:
                 warnings.append(
                     f"interest capitalised on {period_end.isoformat()}, less than three months after "
                     f"{previous_end.isoformat()}: TTK Article 8(2) allows intervals of three months or more"
@@ -363,6 +367,26 @@ def spot(
 # ---- fee caps (TCMB Communiqué 2020/4 Article 9; implementation instruction section 4/II) -------
 
 
+def _flag(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise InputError(f"{name} must be true or false, got {value!r}")
+    return value
+
+
+def _is_accrual_date(day: dt.date, accrual: object) -> bool:
+    """Is ``day`` a regular accrual date of the schedule, as opposed to the day the calculation stops?"""
+    month_end = (day + _ONE_DAY).month != day.month
+    if accrual == "quarterly":
+        return month_end and day.month in (3, 6, 9, 12)
+    if accrual == "monthly":
+        return month_end
+    return True
+
+
+# Until Communiqué 2026/5 took effect the utilisation fee cap covered loans in every currency.
+_FX_UNCAPPED_SINCE = dt.date(2026, 2, 1)
+
+
 def _cap_entry(entry: tr_rates.Dated, on: dt.date | str | None) -> tr_rates.Dated:
     if on is not None and parse_date(on, "on") < entry.since:
         raise InputError(
@@ -440,7 +464,11 @@ def utilisation_fee_cap(
     """
     base = positive(amount, "amount")
     d = whole(days, "days", minimum=1)
+    _flag(revolving, "revolving")
+    _flag(turkish_lira, "turkish_lira")
     entry = _cap_entry(tr_rates.COMMERCIAL_UTILISATION_FEE_CAP, on)
+    if not turkish_lira and on is not None and parse_date(on, "on") < _FX_UNCAPPED_SINCE:
+        turkish_lira = True  # the exemption for loans not in lira did not exist yet
     maximum: Decimal | None = None
     counted = d if revolving else min(d, 360)
     if turkish_lira:

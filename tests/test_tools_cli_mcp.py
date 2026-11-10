@@ -43,7 +43,7 @@ def test_early_repayment_and_affordability_tools():
     )
     assert (part["old_instalment"], part["new_instalment"], part["remaining_instalments"]) == (1718.61, 1344.88, 26)
     best = tools.loan_affordability("0.05", instalments=12, instalment=5000, kkdf="0.15", bsmv="0.15")
-    assert best["largest_principal"] == 40793.66 and best["plan"]["instalment"] <= 5000
+    assert best["largest_principal"] == 40793.62 and best["plan"]["last_instalment"] <= 5000
     assert (
         tools.loan_affordability("0.01", principal=10000, instalment=900, kkdf="0.15", bsmv="0.05")[
             "shortest_term_months"

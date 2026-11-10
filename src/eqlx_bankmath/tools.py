@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import functools
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, cast
@@ -31,7 +32,7 @@ from . import (
 )
 from .daycount import parse_date
 from .errors import InputError
-from .money import Number, as_float, dec
+from .money import Number, as_float, dec, kurus, money, rate
 from .tr import rates
 
 Json = dict[str, Any]
@@ -60,17 +61,44 @@ def _out(value: Any) -> Json:
 
 def _levies(
     product: str | None, disbursed_on: str | None, kkdf: Number | None, bsmv: Number | None
-) -> tuple[Decimal, Decimal, Json]:
-    if kkdf is not None or bsmv is not None:
-        k, b = dec(kkdf or 0, "kkdf"), dec(bsmv or 0, "bsmv")
-        return k, b, {"kkdf": k, "bsmv": b, "source": "given by the caller"}
+) -> tuple[Decimal, Decimal, Decimal, Json]:
+    """Levy rates to apply: (KKDF on interest, BSMV on interest, KKDF on principal at drawdown, report)."""
+    zero = Decimal(0)
     if product is not None:
         if disbursed_on is None:
             raise InputError("with a product, give disbursed_on: levies apply by the date the loan is disbursed")
         found = rates.levies(product, parse_date(disbursed_on, "disbursed_on"))  # type: ignore[arg-type]
-        return found["kkdf"], found["bsmv"], found
-    zero = Decimal(0)
-    return zero, zero, {"kkdf": zero, "bsmv": zero, "source": "none applied: no product and no rates were given"}
+        if kkdf is not None:
+            found["kkdf"], found["kkdf_basis"] = rate(kkdf, "kkdf", maximum=1), "given by the caller"
+        if bsmv is not None:
+            found["bsmv"], found["bsmv_basis"] = rate(bsmv, "bsmv", maximum=1), "given by the caller"
+        return found["kkdf"], found["bsmv"], found["kkdf_on_principal_at_drawdown"], found
+    if kkdf is None and bsmv is None:
+        return zero, zero, zero, {"kkdf": zero, "bsmv": zero, "source": "none applied: no product and no rates given"}
+    if kkdf is None or bsmv is None:
+        raise InputError("give both kkdf and bsmv (use 0 for none), or a product and a disbursement date")
+    k, b = rate(kkdf, "kkdf", maximum=1), rate(bsmv, "bsmv", maximum=1)
+    return k, b, zero, {"kkdf": k, "bsmv": b, "source": "given by the caller"}
+
+
+def _pairs(value: Any, name: str) -> list[tuple[Any, Any]]:
+    """A list of two-item lists, as JSON carries dated amounts."""
+    if not isinstance(value, (list, tuple)):
+        raise InputError(f"{name} must be a list of [first, second] pairs")
+    out = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise InputError(f"{name} must be a list of [first, second] pairs, got {item!r}")
+        out.append((item[0], item[1]))
+    return out
+
+
+def _options(value: Json | None) -> Json:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise InputError("options must be an object")
+    return dict(value)
 
 
 def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -78,6 +106,21 @@ def _call(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)
     except TypeError as exc:
         raise InputError(f"{fn.__name__}: {exc}") from exc
+
+
+def _safe(fn: Callable[..., Json]) -> Callable[..., Json]:
+    """Bad input always ends in an InputError with a reason, never in a traceback."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Json:
+        try:
+            return fn(*args, **kwargs)
+        except InputError:
+            raise
+        except (ArithmeticError, ValueError, LookupError, TypeError, AttributeError) as exc:
+            raise InputError(f"{fn.__name__}: invalid input ({type(exc).__name__}: {exc})") from exc
+
+    return wrapper
 
 
 # ---- instalment loans -------------------------------------------------------------------------
@@ -104,7 +147,8 @@ def loan_plan(
     product: consumer | housing_first_home | commercial_tl | commercial_fx (looks up KKDF and BSMV for
     the disbursement date), or give kkdf and bsmv as fractions. method: annuity | equal_principal | bullet.
     """
-    k, b, used = _levies(product, disbursed_on, kkdf, bsmv)
+    k, b, at_drawdown, used = _levies(product, disbursed_on, kkdf, bsmv)
+    kkdf_at_drawdown = money(kurus(principal, "principal") * at_drawdown)
     p = _call(
         installment.plan,
         principal,
@@ -113,7 +157,7 @@ def loan_plan(
         kkdf=k,
         bsmv=b,
         method=method,
-        fee=fee,
+        fee=dec(fee, "fee") + kkdf_at_drawdown,
         start=disbursed_on,
         interest_only_periods=interest_only_periods,
         balloon=balloon,
@@ -121,6 +165,9 @@ def loan_plan(
     )
     out = p.to_dict(rows=rows)
     out["levies"] = used
+    if kkdf_at_drawdown > 0:
+        out["kkdf_at_drawdown"] = kkdf_at_drawdown
+        out["fee_at_drawdown_note"] = "includes KKDF charged once on the principal"
     return _out(out)
 
 
@@ -147,7 +194,7 @@ def loan_early_repayment(
     `days_since_last_due` days after the last due date (0 = on a due date), and what is saved.
     With partial_amount: the new, lower instalment for the same remaining due dates.
     """
-    k, b, used = _levies(product, disbursed_on, kkdf, bsmv)
+    k, b, _, used = _levies(product, disbursed_on, kkdf, bsmv)
     p = _plan(principal, monthly_rate, instalments, k, b)
     if partial_amount is None:
         out = installment.payoff(p, instalments_paid, days_since_last_due)
@@ -180,7 +227,7 @@ def loan_affordability(
     principal + instalment   -> the shortest term in months;
     principal + instalments  -> the instalment (same as loan_plan, without the rows).
     """
-    k, b, used = _levies(product, disbursed_on, kkdf, bsmv)
+    k, b, _, used = _levies(product, disbursed_on, kkdf, bsmv)
     out: Json
     if principal is None and instalment is not None and instalments is not None:
         best = installment.largest_principal(instalment, monthly_rate, instalments, kkdf=k, bsmv=b)
@@ -218,9 +265,9 @@ def annual_cost_rate(advances: list[list[Number]], payments: list[list[Number]])
     borrower pays, fees and levies included. Each as [years from the first drawdown, amount]; the first
     advance is at 0. In Türkiye a month counts as 1/12 of a year and a day as 1/360."""
     try:
-        adv = [(a[0], a[1]) for a in advances]
-        pay = [(p[0], p[1]) for p in payments]
-    except (TypeError, IndexError) as exc:
+        adv = _pairs(advances, "advances")
+        pay = _pairs(payments, "payments")
+    except InputError as exc:
         raise InputError("advances and payments are lists of [years, amount]") from exc
     x = costrate.annual_cost_rate(adv, pay)
     return {"annual_cost_rate": as_float(x), "annual_cost_rate_percent": as_float(costrate.as_percent(x))}
@@ -248,7 +295,7 @@ def overdraft_interest(
     """Interest on a retail overdraft (KMH, "ek hesap") for a period, from dated movements
     ([date, amount]; positive = more debt), at a monthly rate on daily balances, with KKDF and BSMV.
     options: max_monthly_rate or reference_rate (to check the TCMB ceiling), count_end_day, rounding."""
-    moves = [(m[0], m[1]) for m in movements]
+    moves = _pairs(movements, "movements")
     return _out(
         _call(
             overdraft.period_interest,
@@ -259,7 +306,7 @@ def overdraft_interest(
             monthly_rate,
             kkdf=kkdf,
             bsmv=bsmv,
-            **(options or {}),
+            **_options(options),
         )
     )
 
@@ -278,10 +325,10 @@ def revolving_line(
     periods: interest and levies per period on daily balances. annual_rate is one fraction or a list of
     [date, rate] changes. options: accrual (quarterly | monthly | list of dates), year_basis (360 | 365),
     count_end_day, unpaid_interest (capitalise | paid). Day basis and accrual dates are contractual."""
-    moves = [(m[0], m[1]) for m in movements]
-    rate_arg: Any = [(r[0], r[1]) for r in annual_rate] if isinstance(annual_rate, list) else annual_rate
+    moves = _pairs(movements, "movements")
+    rate_arg: Any = _pairs(annual_rate, "annual_rate") if isinstance(annual_rate, list) else annual_rate
     return _out(
-        _call(revolving.line, opening_balance, moves, start, end, rate_arg, kkdf=kkdf, bsmv=bsmv, **(options or {}))
+        _call(revolving.line, opening_balance, moves, start, end, rate_arg, kkdf=kkdf, bsmv=bsmv, **_options(options))
     )
 
 
@@ -296,7 +343,7 @@ def spot_loan(
 ) -> Json:
     """A spot loan: principal repaid at maturity, simple interest principal x rate x days / basis, with
     levies and fees, total repayment and annual cost. options: year_basis, interest_days, blocked, cost_year_days."""
-    return _out(_call(revolving.spot, principal, annual_rate, days, kkdf=kkdf, bsmv=bsmv, fee=fee, **(options or {})))
+    return _out(_call(revolving.spot, principal, annual_rate, days, kkdf=kkdf, bsmv=bsmv, fee=fee, **_options(options)))
 
 
 def balance_interest(
@@ -304,9 +351,7 @@ def balance_interest(
 ) -> Json:
     """Interest by the interest-number (adat) method: balances is a list of [balance, days];
     interest = sum(balance x days) x annual rate / year basis."""
-    return _out(
-        adat.interest([(b[0], b[1]) for b in balances], annual_rate, year_basis=year_basis, kkdf=kkdf, bsmv=bsmv)
-    )
+    return _out(adat.interest(_pairs(balances, "balances"), annual_rate, year_basis=year_basis, kkdf=kkdf, bsmv=bsmv))
 
 
 def bill_discount(
@@ -331,7 +376,7 @@ def bill_discount(
             kkdf=kkdf,
             bsmv=bsmv,
             fee=fee,
-            **(options or {}),
+            **_options(options),
         )
     )
 
@@ -347,16 +392,16 @@ def floating_rate_plan(
     """A variable-rate instalment loan: rates_by_instalment is a list of [instalment number or date, monthly
     rate] from which a new rate applies; the instalment is recomputed on the remaining balance each time.
     How the instalment is adjusted at repricing is contractual (options: adjustment, method, start)."""
-    seq = [(r[0], r[1]) for r in rates_by_instalment]
+    seq = _pairs(rates_by_instalment, "rates_by_instalment")
     return _out(
-        _call(floating.repricing_schedule, principal, instalments, seq, kkdf=kkdf, bsmv=bsmv, **(options or {}))
+        _call(floating.repricing_schedule, principal, instalments, seq, kkdf=kkdf, bsmv=bsmv, **_options(options))
     )
 
 
 def compounded_reference_rate(observations: list[list[Any]], year_basis: int = 365) -> Json:
     """Compound an overnight reference rate (such as TLREF) over a period: observations is a list of
     [annual rate as a fraction, days it applies]; actual/365 as the index is defined."""
-    return _out(floating.compound_reference([(o[0], o[1]) for o in observations], year_basis=year_basis))
+    return _out(floating.compound_reference(_pairs(observations, "observations"), year_basis=year_basis))
 
 
 # ---- cards ------------------------------------------------------------------------------------
@@ -395,7 +440,7 @@ def card_statement_interest(
     unpaid part of the minimum (the Regulation's reading; options shortfall_basis="whole_balance" gives the
     Law's wording). Simple interest on daily balances. options also: cash_balance, cash_advances, charges,
     day_count, interest_from, rounding, payment_order."""
-    pays = [(p[0], p[1]) for p in (payments or [])]
+    pays = _pairs(payments or [], "payments")
     return _out(
         _call(
             card.statement_interest,
@@ -409,7 +454,7 @@ def card_statement_interest(
             payments=pays,
             kkdf=kkdf,
             bsmv=bsmv,
-            **(options or {}),
+            **_options(options),
         )
     )
 
@@ -431,9 +476,9 @@ def guarantee_commission(
     periods collected in advance, a started period charged in full, no refund. options: rate_period_months
     (12 = annual rate), period_months, collection (advance | arrears), started_period (full | pro_rata),
     day_count, minimum_commission, reductions ([date, amount released]), refund_on_reduction, refund_on_return."""
-    opts = dict(options or {})
+    opts = _options(options)
     if "reductions" in opts:
-        opts["reductions"] = [(r[0], r[1]) for r in opts["reductions"]]
+        opts["reductions"] = _pairs(opts["reductions"], "reductions")
     return _out(
         _call(
             guarantee.commission_schedule,
@@ -453,27 +498,36 @@ def fee_cap_check(kind: str, arguments: Json) -> Json:
 
     consumer_allocation  {principal, quoted_fee}                      0.5 % of the principal (TCMB 2020/7)
     commercial_allocation {limit, months, quoted_fee, on}             0.20 % of the limit per year (TCMB 2020/4)
+    allocation_with_non_cash {cash_limit, non_cash_limit, months, on, quoted_fee}   the same, non-cash limits included
     commercial_utilisation {amount, days, quoted_fee, revolving, on}  1.10 %, pro-rated under a year
     collateral_cost {third_party_cost, on, quoted_fee}                cost paid to third parties plus 15 %
     cash_advance {advance, fee, instalment}                           1 % of a card cash advance
     commercial_prepayment {disbursed_on, ...}                         early repayment fee on commercial loans
     """
+    if not isinstance(arguments, dict):
+        raise InputError("arguments must be an object")
     a = dict(arguments)
     if kind == "consumer_allocation":
         cap = rates.CONSUMER_ALLOCATION_FEE_CAP
-        principal = dec(a.get("principal", 0), "principal")
-        maximum = (principal * cap.value).quantize(Decimal("0.01"))
+        extra = sorted(set(a) - {"principal", "quoted_fee", "on"})
+        if extra or "principal" not in a:
+            raise InputError("consumer_allocation takes principal, and optionally quoted_fee and on")
+        if "on" in a and parse_date(a["on"], "on") < cap.since:
+            raise InputError(f"no ceiling is recorded before {cap.since.isoformat()}")
+        maximum = money(kurus(a["principal"], "principal") * cap.value)
         quoted = a.get("quoted_fee")
         return _out(
             {
                 "maximum_fee": maximum,
                 "basis": cap.basis,
+                "in_force_since": cap.since,
                 "exceeds": None if quoted is None else dec(quoted, "quoted_fee") > maximum,
                 "note": "the allocation fee is the only fee allowed on a consumer or housing loan",
             }
         )
     table: dict[str, Callable[..., Any]] = {
         "commercial_allocation": revolving.allocation_fee_cap,
+        "allocation_with_non_cash": guarantee.allocation_fee_cap,
         "commercial_utilisation": revolving.utilisation_fee_cap,
         "collateral_cost": guarantee.collateral_cost_cap,
         "cash_advance": card.cash_advance_fee_check,
@@ -485,7 +539,7 @@ def fee_cap_check(kind: str, arguments: Json) -> Json:
 
 
 TOOLS: dict[str, Callable[..., Json]] = {
-    f.__name__: f
+    f.__name__: _safe(f)
     for f in (
         loan_plan,
         loan_early_repayment,

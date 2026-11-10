@@ -13,8 +13,10 @@ never suggests one.
 Levy rates (KKDF, BSMV), fee ceilings, card rate spreads and minimum payment rules are set by
 decree or Board decision and change without notice. They are stored as dated entries with their
 legal basis, last compared with the sources on 2026-11-10. A lookup returns the entry in force and
-that date; confirm it against the official source for anything after it. Dates before the earliest
-entry of a table are refused, not guessed.
+that date; confirm it against the official source for anything after it. Where a date is given and
+it lies before the earliest entry of a table, the lookup is refused instead of guessed. Some checks
+take no date (card rate ceilings without `on`, the late interest multiplier, the cash advance fee):
+they use the latest entry and say which.
 
 Not confirmed from a primary text, and therefore inputs with no default or a stated caveat: BSMV on
 housing loans to borrowers who already own a dwelling; BSMV on fees; the stamp duty position of a
@@ -44,7 +46,14 @@ They are not "the correct" ones. If you know the bank's convention, pass it.
 - Housing loan early repayment compensation is returned as a ceiling; the base (principal repaid
   early) is yours to supply.
 - A partial prepayment between due dates needs the calendar days to the next due date when the
-  month is not 30 days long.
+  month is not 30 days long. It is computed for equal-instalment plans only.
+- After a first period longer than 30 days the interest of that period can exceed the instalment;
+  the balance then grows in the first month, as the regulation's formula implies.
+- Every row is rounded to the kuruş. The longer tables in the housing finance annexes (Ek-2 to
+  Ek-4) were printed from unrounded annuities, so balances there differ from this library's by a
+  few kuruş; the consumer annexes and the housing Ek-1 match exactly.
+- On foreign-currency loans KKDF is charged once on the principal at drawdown. That base comes from
+  a secondary copy of the communiqué.
 
 ## Cards and overdrafts
 
@@ -68,7 +77,8 @@ They are not "the correct" ones. If you know the bank's convention, pass it.
 ## Letters of guarantee
 
 - A refund never exceeds the commission collected for the period and never takes a period below
-  its minimum. This is a design choice.
+  its minimum. When a started period is charged in full and refunds are switched on, the refund is
+  the released share of that charge for the days left in the period. These are design choices.
 - Stamp duty, the interest after a call, extension fees and increases of the amount are not covered.
   A called letter becomes a cash loan and is outside the module.
 
