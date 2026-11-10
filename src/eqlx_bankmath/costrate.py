@@ -56,8 +56,11 @@ def annual_cost_rate(advances: Sequence[Flow], payments: Sequence[Flow]) -> Deci
     def gap(x: Decimal) -> Decimal:
         return present_value(pay, x) - present_value(adv, x)
 
+    at_zero = gap(Decimal(0))
+    if at_zero == 0:
+        return Decimal(0)
     lo, hi = Decimal("-0.99"), Decimal(1)
-    if gap(Decimal(0)) >= 0:
+    if at_zero > 0:
         lo = Decimal(0)
     elif gap(lo) < 0:
         raise InputError("the payments are too small for any rate above -99 %")
