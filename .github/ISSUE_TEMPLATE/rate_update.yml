@@ -1,0 +1,24 @@
+name: Rate or ceiling changed
+description: A levy rate, fee ceiling, card spread or minimum payment rule in the tables is out of date.
+labels: [rates]
+body:
+  - type: input
+    id: what
+    attributes:
+      label: Which table entry
+      description: For example "BSMV on consumer loans".
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Official source
+      description: Decree or decision number, Official Gazette date, and a link to the official text.
+    validations:
+      required: true
+  - type: input
+    id: effective
+    attributes:
+      label: Effective date and new value
+    validations:
+      required: true

@@ -1,0 +1,6 @@
+eqlx-bankmath
+Copyright 2026 Can Demir (eqlx.ai)
+
+Calculations follow Turkish legislation and regulator publications named in the README, and public
+textbooks. Figures from published examples are used as test values with their source. No
+third-party code or data is included.

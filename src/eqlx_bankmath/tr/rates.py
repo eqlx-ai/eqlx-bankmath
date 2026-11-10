@@ -53,6 +53,8 @@ KKDF: dict[str, tuple[Dated, ...]] = {
     ),
 }
 
+KKDF_ON_PRINCIPAL = frozenset({"commercial_fx"})
+
 # Caps on fees (TCMB communiqués), as fractions of the stated base
 CONSUMER_ALLOCATION_FEE_CAP = Dated(
     dt.date(2020, 3, 7), _D("0.005"), "TCMB Communiqué 2020/7 Article 10(1): of the principal disbursed"
@@ -81,14 +83,22 @@ def _lookup(table: dict[str, tuple[Dated, ...]], product: str, on: dt.date, what
 
 
 def levies(product: Product, disbursed_on: dt.date) -> dict[str, Any]:
-    """KKDF and BSMV rates on the interest of a loan disbursed on a given date, with their legal basis."""
+    """KKDF and BSMV rates for a loan disbursed on a given date, with their legal basis.
+
+    ``kkdf`` and ``bsmv`` are charged on the interest of each period. On foreign-currency and gold
+    loans KKDF is not a levy on interest: it is charged once, on the principal, when the loan is
+    drawn. It is returned separately as ``kkdf_on_principal_at_drawdown`` and ``kkdf`` is zero.
+    (The base is taken from a secondary copy of the KKDF communiqué; confirm it before relying on it.)
+    """
     k = _lookup(KKDF, product, disbursed_on, "KKDF")
     b = _lookup(BSMV, product, disbursed_on, "BSMV")
+    on_principal = product in KKDF_ON_PRINCIPAL
     return {
         "product": product,
         "disbursed_on": disbursed_on.isoformat(),
-        "kkdf": k.value,
-        "kkdf_basis": k.basis,
+        "kkdf": _D("0") if on_principal else k.value,
+        "kkdf_on_principal_at_drawdown": k.value if on_principal else _D("0"),
+        "kkdf_basis": k.basis + ("; charged once on the principal at drawdown" if on_principal else ""),
         "kkdf_since": k.since.isoformat(),
         "bsmv": b.value,
         "bsmv_basis": b.basis,
