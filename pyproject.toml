@@ -1,0 +1,61 @@
+[project]
+name = "eqlx-bankmath"
+version = "0.1.0"
+description = "Deterministic bank product arithmetic for Türkiye: instalment plans with KKDF and BSMV, annual cost rate, overdraft and revolving interest, credit card statements, guarantee commissions. Exact to the kuruş. Read-only MCP server for AI agents."
+readme = "README.md"
+authors = [
+    { name = "Can Demir", email = "can.demir@eqlx.ai" }
+]
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["loan", "amortization", "apr", "kredi", "kkdf", "bsmv", "overdraft", "credit card", "letter of guarantee", "turkey", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial",
+]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = [
+    "mcp>=2.3.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.16,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]
+
+[project.scripts]
+bankmath = "eqlx_bankmath.cli:main"
+
+[project.urls]
+Homepage = "https://eqlx.org"
+Source = "https://github.com/eqlx-ai/eqlx-bankmath"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # Turkish letters in names of laws and products
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501", "N817"]
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true
